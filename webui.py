@@ -9,35 +9,57 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from packaging import version
+import asyncio
 
 import logging
-logging.getLogger("xformers").addFilter(lambda record: 'A matching Triton is not available' not in record.getMessage())
+
+logging.getLogger("xformers").addFilter(
+    lambda record: "A matching Triton is not available" not in record.getMessage()
+)
 
 from modules import paths, timer, import_hook, errors
 
 startup_timer = timer.Timer()
 
 import torch
-import pytorch_lightning # pytorch_lightning should be imported after torch, but it re-enables warnings on import so import once to disable them
-warnings.filterwarnings(action="ignore", category=DeprecationWarning, module="pytorch_lightning")
+import pytorch_lightning  # pytorch_lightning should be imported after torch, but it re-enables warnings on import so import once to disable them
+
+warnings.filterwarnings(
+    action="ignore", category=DeprecationWarning, module="pytorch_lightning"
+)
 startup_timer.record("import torch")
 
 import gradio
+
 startup_timer.record("import gradio")
 
 import ldm.modules.encoders.modules
+
 startup_timer.record("import ldm")
 
 from modules import extra_networks, ui_extra_networks_checkpoints
-from modules import extra_networks_hypernet, ui_extra_networks_hypernets, ui_extra_networks_textual_inversion
+from modules import (
+    extra_networks_hypernet,
+    ui_extra_networks_hypernets,
+    ui_extra_networks_textual_inversion,
+)
 from modules.call_queue import wrap_queued_call, queue_lock, wrap_gradio_gpu_call
 
 # Truncate version number of nightly/local build of PyTorch to not cause exceptions with CodeFormer or Safetensors
 if ".dev" in torch.__version__ or "+git" in torch.__version__:
     torch.__long_version__ = torch.__version__
-    torch.__version__ = re.search(r'[\d.]+[\d]', torch.__version__).group(0)
+    torch.__version__ = re.search(r"[\d.]+[\d]", torch.__version__).group(0)
 
-from modules import shared, devices, sd_samplers, upscaler, extensions, localization, ui_tempdir, ui_extra_networks
+from modules import (
+    shared,
+    devices,
+    sd_samplers,
+    upscaler,
+    extensions,
+    localization,
+    ui_tempdir,
+    ui_extra_networks,
+)
 import modules.codeformer_model as codeformer
 import modules.face_restoration
 import modules.gfpgan_model as gfpgan
@@ -66,6 +88,41 @@ if cmd_opts.server_name:
 else:
     server_name = "0.0.0.0" if cmd_opts.listen else None
 
+if sys.platform == "win32" and hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
+    # "Any thread" and "selector" should be orthogonal, but there's not a clean
+    # interface for composing policies so pick the right base.
+    _BasePolicy = asyncio.WindowsSelectorEventLoopPolicy  # type: ignore
+else:
+    _BasePolicy = asyncio.DefaultEventLoopPolicy
+
+
+class AnyThreadEventLoopPolicy(_BasePolicy):  # type: ignore
+    """Event loop policy that allows loop creation on any thread.
+    The default `asyncio` event loop policy only automatically creates
+    event loops in the main threads. Other threads must create event
+    loops explicitly or `asyncio.get_event_loop` (and therefore
+    `.IOLoop.current`) will fail. Installing this policy allows event
+    loops to be created automatically on any thread, matching the
+    behavior of Tornado versions prior to 5.0 (or 5.0 on Python 2).
+    Usage::
+        asyncio.set_event_loop_policy(AnyThreadEventLoopPolicy())
+    .. versionadded:: 5.0
+    """
+
+    def get_event_loop(self) -> asyncio.AbstractEventLoop:
+        try:
+            return super().get_event_loop()
+        except (RuntimeError, AssertionError):
+            # This was an AssertionError in python 3.4.2 (which ships with debian jessie)
+            # and changed to a RuntimeError in 3.4.3.
+            # "There is no current event loop in thread %r"
+            loop = self.new_event_loop()
+            self.set_event_loop(loop)
+            return loop
+
+
+asyncio.set_event_loop_policy(AnyThreadEventLoopPolicy())
+
 
 def check_versions():
     if shared.cmd_opts.skip_version_check:
@@ -74,7 +131,8 @@ def check_versions():
     expected_torch_version = "1.13.1"
 
     if version.parse(torch.__version__) < version.parse(expected_torch_version):
-        errors.print_error_explanation(f"""
+        errors.print_error_explanation(
+            f"""
 You are running torch {torch.__version__}.
 The program is tested to work with torch {expected_torch_version}.
 To reinstall the desired version, run with commandline flag --reinstall-torch.
@@ -82,20 +140,25 @@ Beware that this will cause a lot of large files to be downloaded, as well as
 there are reports of issues with training tab on the latest version.
 
 Use --skip-version-check commandline argument to disable this check.
-        """.strip())
+        """.strip()
+        )
 
     expected_xformers_version = "0.0.16rc425"
     if shared.xformers_available:
         import xformers
 
-        if version.parse(xformers.__version__) < version.parse(expected_xformers_version):
-            errors.print_error_explanation(f"""
+        if version.parse(xformers.__version__) < version.parse(
+            expected_xformers_version
+        ):
+            errors.print_error_explanation(
+                f"""
 You are running xformers {xformers.__version__}.
 The program is tested to work with xformers {expected_xformers_version}.
 To reinstall the desired version, run with commandline flag --reinstall-xformers.
 
 Use --skip-version-check commandline argument to disable this check.
-            """.strip())
+            """.strip()
+            )
 
 
 def initialize():
@@ -146,9 +209,20 @@ def initialize():
 
     shared.opts.data["sd_model_checkpoint"] = shared.sd_model.sd_checkpoint_info.title
 
-    shared.opts.onchange("sd_model_checkpoint", wrap_queued_call(lambda: modules.sd_models.reload_model_weights()))
-    shared.opts.onchange("sd_vae", wrap_queued_call(lambda: modules.sd_vae.reload_vae_weights()), call=False)
-    shared.opts.onchange("sd_vae_as_default", wrap_queued_call(lambda: modules.sd_vae.reload_vae_weights()), call=False)
+    shared.opts.onchange(
+        "sd_model_checkpoint",
+        wrap_queued_call(lambda: modules.sd_models.reload_model_weights()),
+    )
+    shared.opts.onchange(
+        "sd_vae",
+        wrap_queued_call(lambda: modules.sd_vae.reload_vae_weights()),
+        call=False,
+    )
+    shared.opts.onchange(
+        "sd_vae_as_default",
+        wrap_queued_call(lambda: modules.sd_vae.reload_vae_weights()),
+        call=False,
+    )
     shared.opts.onchange("temp_dir", ui_tempdir.on_tmpdir_changed)
     startup_timer.record("opts onchange")
 
@@ -156,12 +230,20 @@ def initialize():
     startup_timer.record("reload hypernets")
 
     ui_extra_networks.intialize()
-    ui_extra_networks.register_page(ui_extra_networks_textual_inversion.ExtraNetworksPageTextualInversion())
-    ui_extra_networks.register_page(ui_extra_networks_hypernets.ExtraNetworksPageHypernetworks())
-    ui_extra_networks.register_page(ui_extra_networks_checkpoints.ExtraNetworksPageCheckpoints())
+    ui_extra_networks.register_page(
+        ui_extra_networks_textual_inversion.ExtraNetworksPageTextualInversion()
+    )
+    ui_extra_networks.register_page(
+        ui_extra_networks_hypernets.ExtraNetworksPageHypernetworks()
+    )
+    ui_extra_networks.register_page(
+        ui_extra_networks_checkpoints.ExtraNetworksPageCheckpoints()
+    )
 
     extra_networks.initialize()
-    extra_networks.register_extra_network(extra_networks_hypernet.ExtraNetworkHypernet())
+    extra_networks.register_extra_network(
+        extra_networks_hypernet.ExtraNetworkHypernet()
+    )
     startup_timer.record("extra networks")
 
     if cmd_opts.tls_keyfile is not None and cmd_opts.tls_keyfile is not None:
@@ -180,26 +262,48 @@ def initialize():
 
     # make the program just exit at ctrl+c without waiting for anything
     def sigint_handler(sig, frame):
-        print(f'Interrupted with signal {sig} in {frame}')
+        print(f"Interrupted with signal {sig} in {frame}")
         os._exit(0)
 
     signal.signal(signal.SIGINT, sigint_handler)
 
 
 def setup_middleware(app):
-    app.middleware_stack = None # reset current middleware to allow modifying user provided list
+    app.middleware_stack = (
+        None  # reset current middleware to allow modifying user provided list
+    )
     app.add_middleware(GZipMiddleware, minimum_size=1000)
     if cmd_opts.cors_allow_origins and cmd_opts.cors_allow_origins_regex:
-        app.add_middleware(CORSMiddleware, allow_origins=cmd_opts.cors_allow_origins.split(','), allow_origin_regex=cmd_opts.cors_allow_origins_regex, allow_methods=['*'], allow_credentials=True, allow_headers=['*'])
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cmd_opts.cors_allow_origins.split(","),
+            allow_origin_regex=cmd_opts.cors_allow_origins_regex,
+            allow_methods=["*"],
+            allow_credentials=True,
+            allow_headers=["*"],
+        )
     elif cmd_opts.cors_allow_origins:
-        app.add_middleware(CORSMiddleware, allow_origins=cmd_opts.cors_allow_origins.split(','), allow_methods=['*'], allow_credentials=True, allow_headers=['*'])
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cmd_opts.cors_allow_origins.split(","),
+            allow_methods=["*"],
+            allow_credentials=True,
+            allow_headers=["*"],
+        )
     elif cmd_opts.cors_allow_origins_regex:
-        app.add_middleware(CORSMiddleware, allow_origin_regex=cmd_opts.cors_allow_origins_regex, allow_methods=['*'], allow_credentials=True, allow_headers=['*'])
-    app.build_middleware_stack() # rebuild middleware stack on-the-fly
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origin_regex=cmd_opts.cors_allow_origins_regex,
+            allow_methods=["*"],
+            allow_credentials=True,
+            allow_headers=["*"],
+        )
+    app.build_middleware_stack()  # rebuild middleware stack on-the-fly
 
 
 def create_api(app):
     from modules.api.api import Api
+
     api = Api(app, queue_lock)
     return api
 
@@ -223,9 +327,13 @@ def api_only():
     api = create_api(app)
 
     modules.script_callbacks.app_started_callback(None, app)
+    modules.script_callbacks.before_ui_callback()
 
     print(f"Startup time: {startup_timer.summary()}.")
-    api.launch(server_name="0.0.0.0" if cmd_opts.listen else "127.0.0.1", port=cmd_opts.port if cmd_opts.port else 7861)
+    api.launch(
+        server_name="0.0.0.0" if cmd_opts.listen else "127.0.0.1",
+        port=cmd_opts.port if cmd_opts.port else 7861,
+    )
 
 
 def webui():
@@ -248,11 +356,17 @@ def webui():
 
         gradio_auth_creds = []
         if cmd_opts.gradio_auth:
-            gradio_auth_creds += [x.strip() for x in cmd_opts.gradio_auth.strip('"').replace('\n', '').split(',') if x.strip()]
+            gradio_auth_creds += [
+                x.strip()
+                for x in cmd_opts.gradio_auth.strip('"').replace("\n", "").split(",")
+                if x.strip()
+            ]
         if cmd_opts.gradio_auth_path:
-            with open(cmd_opts.gradio_auth_path, 'r', encoding="utf8") as file:
+            with open(cmd_opts.gradio_auth_path, "r", encoding="utf8") as file:
                 for line in file.readlines():
-                    gradio_auth_creds += [x.strip() for x in line.split(',') if x.strip()]
+                    gradio_auth_creds += [
+                        x.strip() for x in line.split(",") if x.strip()
+                    ]
 
         app, local_url, share_url = shared.demo.launch(
             share=cmd_opts.share,
@@ -261,9 +375,11 @@ def webui():
             ssl_keyfile=cmd_opts.tls_keyfile,
             ssl_certfile=cmd_opts.tls_certfile,
             debug=cmd_opts.gradio_debug,
-            auth=[tuple(cred.split(':')) for cred in gradio_auth_creds] if gradio_auth_creds else None,
+            auth=[tuple(cred.split(":")) for cred in gradio_auth_creds]
+            if gradio_auth_creds
+            else None,
             inbrowser=cmd_opts.autolaunch,
-            prevent_thread_lock=True
+            prevent_thread_lock=True,
         )
         # after initial launch, disable --autolaunch for subsequent restarts
         cmd_opts.autolaunch = False
@@ -274,7 +390,9 @@ def webui():
         # an attacker to trick the user into opening a malicious HTML page, which makes a request to the
         # running web ui and do whatever the attacker wants, including installing an extension and
         # running its code. We disable this here. Suggested by RyotaK.
-        app.user_middleware = [x for x in app.user_middleware if x.cls.__name__ != 'CORSMiddleware']
+        app.user_middleware = [
+            x for x in app.user_middleware if x.cls.__name__ != "CORSMiddleware"
+        ]
 
         setup_middleware(app)
 
@@ -291,7 +409,7 @@ def webui():
         print(f"Startup time: {startup_timer.summary()}.")
 
         wait_on_server(shared.demo)
-        print('Restarting UI...')
+        print("Restarting UI...")
 
         startup_timer.reset()
 
@@ -313,7 +431,11 @@ def webui():
         modelloader.load_upscalers()
         startup_timer.record("load upscalers")
 
-        for module in [module for name, module in sys.modules.items() if name.startswith("modules.ui")]:
+        for module in [
+            module
+            for name, module in sys.modules.items()
+            if name.startswith("modules.ui")
+        ]:
             importlib.reload(module)
         startup_timer.record("reload script modules")
 
@@ -324,12 +446,20 @@ def webui():
         startup_timer.record("reload hypernetworks")
 
         ui_extra_networks.intialize()
-        ui_extra_networks.register_page(ui_extra_networks_textual_inversion.ExtraNetworksPageTextualInversion())
-        ui_extra_networks.register_page(ui_extra_networks_hypernets.ExtraNetworksPageHypernetworks())
-        ui_extra_networks.register_page(ui_extra_networks_checkpoints.ExtraNetworksPageCheckpoints())
+        ui_extra_networks.register_page(
+            ui_extra_networks_textual_inversion.ExtraNetworksPageTextualInversion()
+        )
+        ui_extra_networks.register_page(
+            ui_extra_networks_hypernets.ExtraNetworksPageHypernetworks()
+        )
+        ui_extra_networks.register_page(
+            ui_extra_networks_checkpoints.ExtraNetworksPageCheckpoints()
+        )
 
         extra_networks.initialize()
-        extra_networks.register_extra_network(extra_networks_hypernet.ExtraNetworkHypernet())
+        extra_networks.register_extra_network(
+            extra_networks_hypernet.ExtraNetworkHypernet()
+        )
         startup_timer.record("initialize extra networks")
 
 
